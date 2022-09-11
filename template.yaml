@@ -1,0 +1,5988 @@
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sallowedrepos
+  annotations:
+    description: Requires container images to begin with a repo string from a specified
+      list.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sAllowedRepos
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          type: object
+          properties:
+            repos:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sallowedrepos
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          satisfied := [good | repo = input.parameters.repos[_] ; good = startswith(container.image, repo)]
+          not any(satisfied)
+          msg := sprintf("container <%v> has an invalid image repo <%v>, allowed repos are %v", [container.name, container.image, input.parameters.repos])
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          satisfied := [good | repo = input.parameters.repos[_] ; good = startswith(container.image, repo)]
+          not any(satisfied)
+          msg := sprintf("container <%v> has an invalid image repo <%v>, allowed repos are %v", [container.name, container.image, input.parameters.repos])
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sblocknodeport
+  annotations:
+    description: Disallows all Services with type NodePort.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sBlockNodePort
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sblocknodeport
+
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Service"
+          input.review.object.spec.type == "NodePort"
+          msg := "User is not allowed to create service of type NodePort"
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8scontainerlimits
+  annotations:
+    description: Requires containers to have memory and CPU limits set and within
+      a specified maximum amount.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sContainerLimits
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          type: object
+          properties:
+            cpu:
+              type: string
+            memory:
+              type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8scontainerlimits
+
+        missing(obj, field) = true {
+          not obj[field]
+        }
+
+        missing(obj, field) = true {
+          obj[field] == ""
+        }
+
+        canonify_cpu(orig) = new {
+          is_number(orig)
+          new := orig * 1000
+        }
+
+        canonify_cpu(orig) = new {
+          not is_number(orig)
+          endswith(orig, "m")
+          new := to_number(replace(orig, "m", ""))
+        }
+
+        canonify_cpu(orig) = new {
+          not is_number(orig)
+          not endswith(orig, "m")
+          re_match("^[0-9]+$", orig)
+          new := to_number(orig) * 1000
+        }
+
+        # 10 ** 21
+        mem_multiple("E") = 1000000000000000000000 { true }
+
+        # 10 ** 18
+        mem_multiple("P") = 1000000000000000000 { true }
+
+        # 10 ** 15
+        mem_multiple("T") = 1000000000000000 { true }
+
+        # 10 ** 12
+        mem_multiple("G") = 1000000000000 { true }
+
+        # 10 ** 9
+        mem_multiple("M") = 1000000000 { true }
+
+        # 10 ** 6
+        mem_multiple("k") = 1000000 { true }
+
+        # 10 ** 3
+        mem_multiple("") = 1000 { true }
+
+        # Kubernetes accepts millibyte precision when it probably shouldn't.
+        # https://github.com/kubernetes/kubernetes/issues/28741
+        # 10 ** 0
+        mem_multiple("m") = 1 { true }
+
+        # 1000 * 2 ** 10
+        mem_multiple("Ki") = 1024000 { true }
+
+        # 1000 * 2 ** 20
+        mem_multiple("Mi") = 1048576000 { true }
+
+        # 1000 * 2 ** 30
+        mem_multiple("Gi") = 1073741824000 { true }
+
+        # 1000 * 2 ** 40
+        mem_multiple("Ti") = 1099511627776000 { true }
+
+        # 1000 * 2 ** 50
+        mem_multiple("Pi") = 1125899906842624000 { true }
+
+        # 1000 * 2 ** 60
+        mem_multiple("Ei") = 1152921504606846976000 { true }
+
+        get_suffix(mem) = suffix {
+          not is_string(mem)
+          suffix := ""
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) > 0
+          suffix := substring(mem, count(mem) - 1, -1)
+          mem_multiple(suffix)
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) > 1
+          suffix := substring(mem, count(mem) - 2, -1)
+          mem_multiple(suffix)
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) > 1
+          not mem_multiple(substring(mem, count(mem) - 1, -1))
+          not mem_multiple(substring(mem, count(mem) - 2, -1))
+          suffix := ""
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) == 1
+          not mem_multiple(substring(mem, count(mem) - 1, -1))
+          suffix := ""
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) == 0
+          suffix := ""
+        }
+
+        canonify_mem(orig) = new {
+          is_number(orig)
+          new := orig * 1000
+        }
+
+        canonify_mem(orig) = new {
+          not is_number(orig)
+          suffix := get_suffix(orig)
+          raw := replace(orig, suffix, "")
+          re_match("^[0-9]+$", raw)
+          new := to_number(raw) * mem_multiple(suffix)
+        }
+
+        violation[{"msg": msg}] {
+          general_violation[{"msg": msg, "field": "containers"}]
+        }
+
+        violation[{"msg": msg}] {
+          general_violation[{"msg": msg, "field": "initContainers"}]
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec.template.spec.containers[field][_]
+          cpu_orig := container.resources.limits.cpu
+          not canonify_cpu(cpu_orig)
+          msg := sprintf("container <%v> cpu limit <%v> could not be parsed", [container.name, cpu_orig])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec.template.spec.containers[field][_]
+          mem_orig := container.resources.limits.memory
+          not canonify_mem(mem_orig)
+          msg := sprintf("container <%v> memory limit <%v> could not be parsed", [container.name, mem_orig])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec.template.spec.containers[field][_]
+          not container.resources
+          msg := sprintf("container <%v> has no resource limits", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec.template.spec.containers[field][_]
+          not container.resources.limits
+          msg := sprintf("container <%v> has no resource limits", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec.template.spec.containers[field][_]
+          missing(container.resources.limits, "cpu")
+          msg := sprintf("container <%v> has no cpu limit", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec.template.spec.containers[field][_]
+          missing(container.resources.limits, "memory")
+          msg := sprintf("container <%v> has no memory limit", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec.template.spec.containers[field][_]
+          cpu_orig := container.resources.limits.cpu
+          cpu := canonify_cpu(cpu_orig)
+          max_cpu_orig := input.parameters.cpu
+          max_cpu := canonify_cpu(max_cpu_orig)
+          cpu > max_cpu
+          msg := sprintf("container <%v> cpu limit <%v> is higher than the maximum allowed of <%v>", [container.name, cpu_orig, max_cpu_orig])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec.template.spec.containers[field][_]
+          mem_orig := container.resources.limits.memory
+          mem := canonify_mem(mem_orig)
+          max_mem_orig := input.parameters.memory
+          max_mem := canonify_mem(max_mem_orig)
+          mem > max_mem
+          msg := sprintf("container <%v> memory limit <%v> is higher than the maximum allowed of <%v>", [container.name, mem_orig, max_mem_orig])
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8scontainerratios
+  annotations:
+    description: Sets a maximum ratio for container resource limits to requests.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sContainerRatios
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            ratio:
+              type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8scontainerratios
+
+        missing(obj, field) = true {
+          not obj[field]
+        }
+
+        missing(obj, field) = true {
+          obj[field] == ""
+        }
+
+        canonify_cpu(orig) = new {
+          is_number(orig)
+          new := orig * 1000
+        }
+
+        canonify_cpu(orig) = new {
+          not is_number(orig)
+          endswith(orig, "m")
+          new := to_number(replace(orig, "m", ""))
+        }
+
+        canonify_cpu(orig) = new {
+          not is_number(orig)
+          not endswith(orig, "m")
+          re_match("^[0-9]+$", orig)
+          new := to_number(orig) * 1000
+        }
+
+        canonify_cpu(orig) = new {
+          not is_number(orig)
+          not endswith(orig, "m")
+          re_match("^[0-9]+[.][0-9]+$", orig)
+          new := to_number(orig) * 1000
+        }
+
+        # 10 ** 21
+        mem_multiple("E") = 1000000000000000000000 { true }
+
+        # 10 ** 18
+        mem_multiple("P") = 1000000000000000000 { true }
+
+        # 10 ** 15
+        mem_multiple("T") = 1000000000000000 { true }
+
+        # 10 ** 12
+        mem_multiple("G") = 1000000000000 { true }
+
+        # 10 ** 9
+        mem_multiple("M") = 1000000000 { true }
+
+        # 10 ** 6
+        mem_multiple("k") = 1000000 { true }
+
+        # 10 ** 3
+        mem_multiple("") = 1000 { true }
+
+        # Kubernetes accepts millibyte precision when it probably shouldn't.
+        # https://github.com/kubernetes/kubernetes/issues/28741
+        # 10 ** 0
+        mem_multiple("m") = 1 { true }
+
+        # 1000 * 2 ** 10
+        mem_multiple("Ki") = 1024000 { true }
+
+        # 1000 * 2 ** 20
+        mem_multiple("Mi") = 1048576000 { true }
+
+        # 1000 * 2 ** 30
+        mem_multiple("Gi") = 1073741824000 { true }
+
+        # 1000 * 2 ** 40
+        mem_multiple("Ti") = 1099511627776000 { true }
+
+        # 1000 * 2 ** 50
+        mem_multiple("Pi") = 1125899906842624000 { true }
+
+        # 1000 * 2 ** 60
+        mem_multiple("Ei") = 1152921504606846976000 { true }
+
+        get_suffix(mem) = suffix {
+          not is_string(mem)
+          suffix := ""
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) > 0
+          suffix := substring(mem, count(mem) - 1, -1)
+          mem_multiple(suffix)
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) > 1
+          suffix := substring(mem, count(mem) - 2, -1)
+          mem_multiple(suffix)
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) > 1
+          not mem_multiple(substring(mem, count(mem) - 1, -1))
+          not mem_multiple(substring(mem, count(mem) - 2, -1))
+          suffix := ""
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) == 1
+          not mem_multiple(substring(mem, count(mem) - 1, -1))
+          suffix := ""
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) == 0
+          suffix := ""
+        }
+
+        canonify_mem(orig) = new {
+          is_number(orig)
+          new := orig * 1000
+        }
+
+        canonify_mem(orig) = new {
+          not is_number(orig)
+          suffix := get_suffix(orig)
+          raw := replace(orig, suffix, "")
+          re_match("^[0-9]+$", raw)
+          new := to_number(raw) * mem_multiple(suffix)
+        }
+
+        violation[{"msg": msg}] {
+          general_violation[{"msg": msg, "field": "containers"}]
+        }
+
+        violation[{"msg": msg}] {
+          general_violation[{"msg": msg, "field": "initContainers"}]
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          cpu_orig := container.resources.limits.cpu
+          not canonify_cpu(cpu_orig)
+          msg := sprintf("container %v cpu limit %v could not be parsed", [container.name, cpu_orig])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          mem_orig := container.resources.limits.memory
+          not canonify_mem(mem_orig)
+          msg := sprintf("container %v memory limit %v could not be parsed", [container.name, mem_orig])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          cpu_orig := container.resources.requests.cpu
+          not canonify_cpu(cpu_orig)
+          msg := sprintf("container %v cpu request %v could not be parsed", [container.name, cpu_orig])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          mem_orig := container.resources.requests.memory
+          not canonify_mem(mem_orig)
+          msg := sprintf("container %v memory request %v could not be parsed", [container.name, mem_orig])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          not container.resources
+          msg := sprintf("container %v has no resource limits", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          not container.resources.limits
+          msg := sprintf("container %v has no resource limits", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          missing(container.resources.limits, "cpu")
+          msg := sprintf("container %v has no cpu limit", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          missing(container.resources.limits, "memory")
+          msg := sprintf("container %v has no memory limit", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          not container.resources.requests
+          msg := sprintf("container %v has no resource requests", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          missing(container.resources.requests, "cpu")
+          msg := sprintf("container %v has no cpu request", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          missing(container.resources.requests, "memory")
+          msg := sprintf("container %v has no memory request", [container.name])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          cpu_limits_orig := container.resources.limits.cpu
+          cpu_limits := canonify_cpu(cpu_limits_orig)
+          cpu_requests_orig := container.resources.requests.cpu
+          cpu_requests := canonify_cpu(cpu_requests_orig)
+          cpu_ratio := input.parameters.ratio
+          to_number(cpu_limits) > to_number(cpu_ratio) * to_number(cpu_requests)
+          msg := sprintf("container %v cpu limit %v is higher than the maximum allowed ratio of %v", [container.name, cpu_limits_orig, cpu_ratio])
+        }
+
+        general_violation[{"msg": msg, "field": field}] {
+          container := input.review.object.spec[field][_]
+          mem_limits_orig := container.resources.limits.memory
+          mem_requests_orig := container.resources.requests.memory
+          mem_limits := canonify_mem(mem_limits_orig)
+          mem_requests := canonify_mem(mem_requests_orig)
+          mem_ratio := input.parameters.ratio
+          to_number(mem_limits) > to_number(mem_ratio) * to_number(mem_requests)
+          msg := sprintf("container %v memory limit %v is higher than the maximum allowed ratio of %v", [container.name, mem_limits_orig, mem_ratio])
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sdisallowedtags
+  annotations:
+    description: Requires container images to have an image tag different
+      from the ones in a specified list.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sDisallowedTags
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          type: object
+          properties:
+            tags:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sdisallowedtags
+
+        violation[{"msg": msg}] {
+          container := input_containers[_]
+          tags := [forbid | tag = input.parameters.tags[_] ; forbid = endswith(container.image, concat(":", ["", tag]))]
+          any(tags)
+          msg := sprintf("container <%v> uses a disallowed tag <%v>; disallowed tags are %v", [container.name, container.image, input.parameters.tags])
+        }
+
+        violation[{"msg": msg}] {
+          container := input_containers[_]
+          tag := [contains(container.image, ":")]
+          not all(tag)
+          msg := sprintf("container <%v> didn't specify an image tag <%v>", [container.name, container.image])
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.containers[_]
+        }
+        input_containers[c] {
+          c := input.review.object.spec.initContainers[_]
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sexternalips
+  annotations:
+    description: "Restricts Services from containing externalIPs except those in a provided allowlist."
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sExternalIPs
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          type: object
+          properties:
+            allowedIPs:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sexternalips
+
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Service"
+          input.review.kind.group == ""
+          allowedIPs := {ip | ip := input.parameters.allowedIPs[_]}
+          externalIPs := {ip | ip := input.review.object.spec.externalIPs[_]}
+          forbiddenIPs := externalIPs - allowedIPs
+          count(forbiddenIPs) > 0
+          msg := sprintf("service has forbidden external IPs: %v", [forbiddenIPs])
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8shttpsonly
+  annotations:
+    description: Requires Ingress resources to be HTTPS only; TLS configuration should
+      be set and `kubernetes.io/ingress.allow-http` annotation equals false.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sHttpsOnly
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8shttpsonly
+
+        violation[{"msg": msg}] {
+          input.review.object.kind == "Ingress"
+          re_match("^(extensions|networking.k8s.io)/", input.review.object.apiVersion)
+          ingress := input.review.object
+          not https_complete(ingress)
+          msg := sprintf("Ingress should be https. tls configuration and allow-http=false annotation are required for %v", [ingress.metadata.name])
+        }
+
+        https_complete(ingress) = true {
+          ingress.spec["tls"]
+          count(ingress.spec.tls) > 0
+          ingress.metadata.annotations["kubernetes.io/ingress.allow-http"] == "false"
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8simagedigests
+  annotations:
+    description: Requires container images to contain a digest.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sImageDigests
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8simagedigests
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          satisfied := [re_match("@[a-z0-9]+([+._-][a-z0-9]+)*:[a-zA-Z0-9=_-]+", container.image)]
+          not all(satisfied)
+          msg := sprintf("container <%v> uses an image without a digest <%v>", [container.name, container.image])
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          satisfied := [re_match("@[a-z0-9]+([+._-][a-z0-9]+)*:[a-zA-Z0-9=_-]+", container.image)]
+          not all(satisfied)
+          msg := sprintf("initContainer <%v> uses an image without a digest <%v>", [container.name, container.image])
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sreplicalimits
+  annotations:
+    description: Requires a number of replicas to be set for a deployment between a min and max value.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sReplicaLimits
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          type: object
+          properties:
+            ranges:
+              type: array
+              items:
+                type: object
+                properties:
+                  min_replicas:
+                    type: integer
+                  max_replicas:
+                    type: integer
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sreplicalimits
+
+        deployment_name = input.review.object.metadata.name
+
+        violation[{"msg": msg}] {
+          spec := input.review.object.spec
+          not input_replica_limit(spec)
+          msg := sprintf("The provided number of replicas is not allowed for deployment: %v. Allowed ranges: %v", [deployment_name, input.parameters])
+        }
+
+        input_replica_limit(spec) {
+          provided := input.review.object.spec.replicas
+          count(input.parameters.ranges) > 0
+          range := input.parameters.ranges[_]
+          value_within_range(range, provided)
+        }
+
+        value_within_range(range, value) {
+          range.min_replicas <= value
+          range.max_replicas >= value
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredannotations
+  annotations:
+    description: Requires all resources to contain a specified annotation(s) with a value
+      matching a provided regular expression.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredAnnotations
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            message:
+              type: string
+            annotations:
+              type: array
+              items:
+                type: object
+                properties:
+                  key:
+                    type: string
+                  allowedRegex:
+                    type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredannotations
+
+        violation[{"msg": msg, "details": {"missing_annotations": missing}}] {
+            provided := {annotation | input.review.object.metadata.annotations[annotation]}
+            required := {annotation | annotation := input.parameters.annotations[_].key}
+            missing := required - provided
+            count(missing) > 0
+            msg := sprintf("you must provide annotation(s): %v", [missing])
+        }
+
+        violation[{"msg": msg}] {
+          value := input.review.object.metadata.annotations[key]
+          expected := input.parameters.annotations[_]
+          expected.key == key
+          expected.allowedRegex != ""
+          not re_match(expected.allowedRegex, value)
+          msg := sprintf("Annotation <%v: %v> does not satisfy allowed regex: %v", [key, value, expected.allowedRegex])
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredlabels
+  annotations:
+    description: Requires all resources to contain a specified label with a value
+      matching a provided regular expression.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredLabels
+      validation:
+        # Schema for the `parameters` field
+        openAPIV3Schema:
+          type: object
+          properties:
+            message:
+              type: string
+            labels:
+              type: array
+              items:
+                type: object
+                properties:
+                  key:
+                    type: string
+                  allowedRegex:
+                    type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredlabels
+
+        get_message(parameters, _default) = msg {
+          not parameters.message
+          msg := _default
+        }
+
+        get_message(parameters, _default) = msg {
+          msg := parameters.message
+        }
+
+        violation[{"msg": msg, "details": {"missing_labels": missing}}] {
+          provided := {label | input.review.object.metadata.labels[label]}
+          required := {label | label := input.parameters.labels[_].key}
+          missing := required - provided
+          count(missing) > 0
+          def_msg := sprintf("you must provide labels: %v", [missing])
+          msg := get_message(input.parameters, def_msg)
+        }
+
+        violation[{"msg": msg}] {
+          value := input.review.object.metadata.labels[key]
+          expected := input.parameters.labels[_]
+          expected.key == key
+          # do not match if allowedRegex is not defined, or is an empty string
+          expected.allowedRegex != ""
+          not re_match(expected.allowedRegex, value)
+          def_msg := sprintf("Label <%v: %v> does not satisfy allowed regex: %v", [key, value, expected.allowedRegex])
+          msg := get_message(input.parameters, def_msg)
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredprobes
+  annotations:
+    description: Requires Pods to have readiness and/or liveness probes.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredProbes
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            probes:
+              type: array
+              items:
+                type: string
+            probeTypes:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredprobes
+
+        probe_type_set = probe_types {
+          probe_types := {type | type := input.parameters.probeTypes[_]}
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          probe := input.parameters.probes[_]
+          probe_is_missing(container, probe)
+          msg := get_violation_message(container, input.review, probe)
+        }
+
+        probe_is_missing(ctr, probe) = true {
+          not ctr[probe]
+        }
+
+        probe_is_missing(ctr, probe) = true {
+          probe_field_empty(ctr, probe)
+        }
+
+        probe_field_empty(ctr, probe) = true {
+          probe_fields := {field | ctr[probe][field]}
+          diff_fields := probe_type_set - probe_fields
+          count(diff_fields) == count(probe_type_set)
+        }
+
+        get_violation_message(container, review, probe) = msg {
+          msg := sprintf("Container %v in your %v %v has no %v", [container.name, review.kind.kind, review.object.metadata.name, probe])
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8suniqueingresshost
+  annotations:
+    description: Requires all Ingress hosts to be unique.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sUniqueIngressHost
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8suniqueingresshost
+       
+        identical(obj, review) {
+          obj.metadata.namespace == review.object.metadata.namespace
+          obj.metadata.name == review.object.metadata.name
+        }
+
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Ingress"
+          re_match("^(extensions|networking.k8s.io)$", input.review.kind.group)
+          host := input.review.object.spec.rules[_].host
+          other := data.inventory.namespace[ns][otherapiversion]["Ingress"][name]
+          re_match("^(extensions|networking.k8s.io)/.+$", otherapiversion)
+          other.spec.rules[_].host == host
+          not identical(other, input.review)
+          msg := sprintf("ingress host conflicts with an existing ingress <%v>", [host])
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8suniqueserviceselector
+  annotations:
+    description: Requires Services to have unique selectors within a namespace.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sUniqueServiceSelector
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8suniqueserviceselector
+
+        make_apiversion(kind) = apiVersion {
+          g := kind.group
+          v := kind.version
+          g != ""
+          apiVersion = sprintf("%v/%v", [g, v])
+        }
+
+        make_apiversion(kind) = apiVersion {
+          kind.group == ""
+          apiVersion = kind.version
+        }
+
+        identical(obj, review) {
+          obj.metadata.namespace == review.namespace
+          obj.metadata.name == review.name
+          obj.kind == review.kind.kind
+          obj.apiVersion == make_apiversion(review.kind)
+        }
+
+        flatten_selector(obj) = flattened {
+          selectors := [s | s = concat(":", [key, val]); val = obj.spec.selector[key]]
+          flattened := concat(",", sort(selectors))
+        }
+
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Service"
+          input.review.kind.version == "v1"
+          input.review.kind.group == ""
+          input_selector := flatten_selector(input.review.object)
+          other := data.inventory.namespace[namespace][_][_][name]
+          not identical(other, input.review)
+          other_selector := flatten_selector(other)
+          input_selector == other_selector
+          msg := sprintf("same selector as service %v in namespace %v", [name, namespace])
+        }
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate 
+metadata:
+  name: lbtypesvcnotallowed
+spec:
+  crd:
+    spec:
+      names:
+        kind: LBTypeSvcNotAllowed
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package kubernetes.admission
+        violation[{"msg": msg}] {
+                    input.review.kind.kind = "Service"
+                    input.review.operation = "CREATE"
+                    input.review.object.spec.type = "LoadBalancer"
+                    msg := "LoadBalancer Services are not permitted"
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: podhostnetwork
+spec:
+  crd:
+    spec:
+      names:
+        kind: PodHostnetwork
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package pod_hostnetwork
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00020")
+        openshift.pod.spec.hostNetwork
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: hostNetwork is present which gives the pod access to the loopback device, services listening on localhost, and could be used to snoop on network activity of other pods on the same node.", [konstraint_core.kind, konstraint_core.name]), "RHCOP-OCP_BESTPRACT-00020")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: podreplicasbelowone
+spec:
+  crd:
+    spec:
+      names:
+        kind: PodReplicasBelowOne
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package pod_replicas_below_one
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00021")
+        openshift.pod
+
+        replicas := konstraint_core.resource.spec.replicas
+        replicas <= 1
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: replicas is %d - expected replicas to be greater than 1 for HA guarantees.", [konstraint_core.kind, konstraint_core.name, replicas]), "RHCOP-OCP_BESTPRACT-00021")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: podreplicasnotodd
+spec:
+  crd:
+    spec:
+      names:
+        kind: PodReplicasNotOdd
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package pod_replicas_not_odd
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00022")
+        openshift.pod
+
+        replicas := konstraint_core.resource.spec.replicas
+        replicas % 2 == 0
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: replicas is %d - expected an odd number for HA guarantees.", [konstraint_core.kind, konstraint_core.name, replicas]), "RHCOP-OCP_BESTPRACT-00022")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: commonk8slabelsnotset
+spec:
+  crd:
+    spec:
+      names:
+        kind: CommonK8sLabelsNotset
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package common_k8s_labels_notset
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00001")
+        openshift.is_pod_or_networking
+
+        not is_common_labels_set(konstraint_core.resource.metadata)
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: does not contain all the expected k8s labels in 'metadata.labels'. See: https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels", [konstraint_core.kind, konstraint_core.name]), "RHCOP-OCP_BESTPRACT-00001")
+      }
+
+      is_common_labels_set(metadata) {
+        metadata.labels["app.kubernetes.io/name"]
+        metadata.labels["app.kubernetes.io/instance"]
+        metadata.labels["app.kubernetes.io/version"]
+        metadata.labels["app.kubernetes.io/component"]
+        metadata.labels["app.kubernetes.io/part-of"]
+        metadata.labels["app.kubernetes.io/managed-by"]
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerenvmaxmemorynotset
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerEnvMaxmemoryNotset
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_env_maxmemory_notset
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00002")
+        container := openshift.containers[_]
+
+        konstraint_core.labels["redhat-cop.github.com/technology"] == "java"
+        not is_env_max_memory_set(container)
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' does not have an env named 'CONTAINER_MAX_MEMORY' which is used by the Red Hat base images to calculate memory. See: https://docs.openshift.com/container-platform/4.6/nodes/clusters/nodes-cluster-resource-configure.html and https://github.com/jboss-openshift/cct_module/blob/master/jboss/container/java/jvm/bash/artifacts/opt/jboss/container/java/jvm/java-default-options", [konstraint_core.kind, konstraint_core.name, container.name]), "RHCOP-OCP_BESTPRACT-00002")
+      }
+
+      is_env_max_memory_set(container) {
+        env := container.env[_]
+        env.name == "CONTAINER_MAX_MEMORY"
+        env.valueFrom.resourceFieldRef.resource == "limits.memory"
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerimagelatest
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerImageLatest
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_image_latest
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00003")
+        container := openshift.containers[_]
+
+        endswith(container.image, ":latest")
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' is using the latest tag for its image (%s), which is an anti-pattern.", [konstraint_core.kind, konstraint_core.name, container.name, container.image]), "RHCOP-OCP_BESTPRACT-00003")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerimageunknownregistries
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerImageUnknownregistries
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_image_unknownregistries
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00004")
+        container := openshift.containers[_]
+
+        registry := get_registry(container.image)
+        not known_registry(container.image, registry)
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' is from (%s), which is an unknown registry.", [konstraint_core.kind, konstraint_core.name, container.name, container.image]), "RHCOP-OCP_BESTPRACT-00004")
+      }
+
+      get_registry(image) = registry {
+        contains(image, "/")
+        possible_registry := lower(split(image, "/")[0])
+        contains(possible_registry, ".")
+
+        registry := possible_registry
+      }
+
+      known_registry(image, registry) {
+        known_registries := ["image-registry.openshift-image-registry.svc", "registry.redhat.io", "registry.connect.redhat.com", "quay.io"]
+        registry == known_registries[_]
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerjavaxmxset
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerJavaXmxSet
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_java_xmx_set
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00005")
+        container := openshift.containers[_]
+
+        konstraint_core.labels["redhat-cop.github.com/technology"] == "java"
+        container_opts_contains_xmx(container)
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' contains -Xmx in either, command, args or env. Instead, it is suggested you use the downward API to set the env 'CONTAINER_MAX_MEMORY'", [konstraint_core.kind, konstraint_core.name, container.name]), "RHCOP-OCP_BESTPRACT-00005")
+      }
+
+      container_opts_contains_xmx(container) {
+        value := container.command[_]
+        contains(value, "-Xmx")
+      }
+
+      container_opts_contains_xmx(container) {
+        value := container.args[_]
+        contains(value, "-Xmx")
+      }
+
+      container_opts_contains_xmx(container) {
+        value := container.env[_]
+        contains(value.value, "-Xmx")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerlabelkeyinconsistent
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerLabelkeyInconsistent
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_labelkey_inconsistent
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00006")
+        openshift.pod
+
+        some key
+        value := konstraint_core.labels[key]
+
+        not label_key_starts_with_expected(key)
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: has a label key which did not start with 'app.kubernetes.io/' or 'redhat-cop.github.com/'. Found '%s'", [konstraint_core.kind, konstraint_core.name, key]), "RHCOP-OCP_BESTPRACT-00006")
+      }
+
+      label_key_starts_with_expected(key) {
+        startswith(key, "app.kubernetes.io/")
+      }
+
+      label_key_starts_with_expected(key) {
+        startswith(key, "redhat-cop.github.com/")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerlivenessprobenotset
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerLivenessprobeNotset
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_livenessprobe_notset
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00008")
+        container := openshift.containers[_]
+
+        konstraint_core.missing_field(container, "livenessProbe")
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' has no livenessProbe. See: https://docs.openshift.com/container-platform/4.6/applications/application-health.html", [konstraint_core.kind, konstraint_core.name, container.name]), "RHCOP-OCP_BESTPRACT-00008")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerlivenessreadinessprobeequal
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerLivenessReadinessprobeEqual
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_liveness_readinessprobe_equal
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00007")
+        container := openshift.containers[_]
+
+        container.livenessProbe
+        container.readinessProbe
+        container.livenessProbe == container.readinessProbe
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' livenessProbe and readinessProbe are equal, which is an anti-pattern.", [konstraint_core.kind, konstraint_core.name, container.name]), "RHCOP-OCP_BESTPRACT-00007")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerreadinessprobenotset
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerReadinessprobeNotset
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_readinessprobe_notset
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00009")
+        container := openshift.containers[_]
+
+        konstraint_core.missing_field(container, "readinessProbe")
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' has no readinessProbe. See: https://docs.openshift.com/container-platform/4.6/applications/application-health.html", [konstraint_core.kind, konstraint_core.name, container.name]), "RHCOP-OCP_BESTPRACT-00009")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerresourceslimitscpuset
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerResourcesLimitsCpuSet
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_resources_limits_cpu_set
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00010")
+        container := openshift.containers[_]
+
+        container.resources.limits.cpu
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' has cpu limits (%d). It is not recommended to limit cpu. See: https://www.reddit.com/r/kubernetes/comments/all1vg/on_kubernetes_cpu_limits", [konstraint_core.kind, konstraint_core.name, container.name, container.resources.limits.cpu]), "RHCOP-OCP_BESTPRACT-00010")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerresourceslimitsmemorygreaterthan
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerResourcesLimitsMemoryGreaterThan
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.memory
+
+      kb := 1024
+      mb := kb * 1024
+      gb := mb * 1024
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_resources_limits_memory_greater_than
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.memory
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00011")
+        #NOTE: upperBound is an arbitrary number and it should be changed to what your company believes is the correct policy
+        upperBound := 6 * memory.gb
+
+        container := openshift.containers[_]
+
+        not startswith(container.resources.limits.memory, "$")
+        memoryBytes := units.parse_bytes(container.resources.limits.memory)
+        memoryBytes > upperBound
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' has a memory limit of '%s' which is larger than the upper '%dGi' limit.", [konstraint_core.kind, konstraint_core.name, container.name, container.resources.limits.memory, (upperBound / memory.gb)]), "RHCOP-OCP_BESTPRACT-00011")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerresourceslimitsmemorynotset
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerResourcesLimitsMemoryNotset
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_resources_limits_memory_notset
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00012")
+        container := openshift.containers[_]
+
+        # TODO: Maybe should use below factored out?
+        #konstraint.missing_field(container.resources.limits, "memory")
+        not container.resources.limits.memory
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' has no memory limits. It is recommended to limit memory, as memory always has a maximum. See: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers", [konstraint_core.kind, konstraint_core.name, container.name]), "RHCOP-OCP_BESTPRACT-00012")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerresourcesmemoryunitincorrect
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerResourcesMemoryunitIncorrect
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_resources_memoryunit_incorrect
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00013")
+        container := openshift.containers[_]
+
+        not startswith(container.resources.requests.memory, "$")
+        not startswith(container.resources.limits.memory, "$")
+        not is_resource_memory_units_valid(container)
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' memory resources for limits or requests (%s / %s) has an incorrect unit. See: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#resource-units-in-kubernetes", [konstraint_core.kind, konstraint_core.name, container.name, container.resources.limits.memory, container.resources.requests.memory]), "RHCOP-OCP_BESTPRACT-00013")
+      }
+
+      is_resource_memory_units_valid(container) {
+        memoryLimitsUnit := regex.find_n("[A-Za-z]+", container.resources.limits.memory, 1)[0]
+        memoryRequestsUnit := regex.find_n("[A-Za-z]+", container.resources.requests.memory, 1)[0]
+
+        units := ["Ei", "Pi", "Ti", "Gi", "Mi", "Ki", "E", "P", "T", "G", "M", "K"]
+        memoryLimitsUnit == units[_]
+        memoryRequestsUnit == units[_]
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerresourcesrequestscpuunitincorrect
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerResourcesRequestsCpuunitIncorrect
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_resources_requests_cpuunit_incorrect
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00014")
+        container := openshift.containers[_]
+
+        not is_resource_requests_cpu_contains_dollar(container)
+        not is_resource_requests_cpu_units_valid(container)
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s container '%s' cpu resources for requests (%s) has an incorrect unit. See: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#resource-units-in-kubernetes", [konstraint_core.kind, konstraint_core.name, container.name, container.resources.requests.cpu]), "RHCOP-OCP_BESTPRACT-00014")
+      }
+
+      is_resource_requests_cpu_contains_dollar(container) {
+        not is_resource_requests_cpu_a_core(container)
+        startswith(container.resources.requests.cpu, "$")
+      }
+
+      is_resource_requests_cpu_a_core(container)  {
+        is_number(input.resources.requests.cpu)
+        to_number(input.resources.requests.cpu)
+      }
+
+      is_resource_requests_cpu_units_valid(container)  {
+        is_resource_requests_cpu_a_core(container)
+      }
+
+      is_resource_requests_cpu_units_valid(container)  {
+        not is_resource_requests_cpu_a_core(container)
+
+        # 'cpu' can be a quoted number, which is why we concat an empty string[] to match whole cpu cores
+        cpuRequestsUnit := array.concat(regex.find_n("[A-Za-z]+", container.resources.requests.cpu, 1), [""])[0]
+
+        units := ["m", ""]
+        cpuRequestsUnit == units[_]
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containerresourcesrequestsmemorygreaterthan
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerResourcesRequestsMemoryGreaterThan
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.memory
+
+      kb := 1024
+      mb := kb * 1024
+      gb := mb * 1024
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_resources_requests_memory_greater_than
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.memory
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00015")
+        #NOTE: upperBound is an arbitrary number and it should be changed to what your company believes is the correct policy
+        upperBound := 2 * memory.gb
+
+        container := openshift.containers[_]
+
+        not startswith(container.resources.requests.memory, "$")
+        memoryBytes := units.parse_bytes(container.resources.requests.memory)
+        memoryBytes > upperBound
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' has a memory request of '%s' which is larger than the upper '%dGi' limit.", [konstraint_core.kind, konstraint_core.name, container.name, container.resources.requests.memory, (upperBound / memory.gb)]), "RHCOP-OCP_BESTPRACT-00015")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containersecretmountedenvs
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerSecretMountedEnvs
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_secret_mounted_envs
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00016")
+        container := openshift.containers[_]
+
+        env := container.env[_]
+        env.valueFrom.secretKeyRef
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' has a secret '%s' mounted as an environment variable. Secrets are meant to be secret, it is not a good practice to mount them as env vars.", [konstraint_core.kind, konstraint_core.name, container.name, env.valueFrom.secretKeyRef.name]), "RHCOP-OCP_BESTPRACT-00016")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containervolumemountinconsistentpath
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerVolumemountInconsistentPath
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_volumemount_inconsistent_path
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00017")
+        container := openshift.containers[_]
+
+        volumeMount := container.volumeMounts[_]
+        not startswith(volumeMount.mountPath, "/var/run")
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: container '%s' has a volumeMount '%s' mountPath at '%s'. A good practice is to use consistent mount paths, such as: /var/run/{organization}/{mount} - i.e.: /var/run/io.redhat-cop/my-secret", [konstraint_core.kind, konstraint_core.name, container.name, volumeMount.name, volumeMount.mountPath]), "RHCOP-OCP_BESTPRACT-00017")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: containervolumemountmissing
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerVolumemountMissing
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package container_volumemount_missing
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00018")
+        volume := openshift.pod.spec.volumes[_]
+
+        not containers_volumemounts_contains_volume(openshift.containers, volume)
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: volume '%s' does not have a volumeMount in any of the containers.", [konstraint_core.kind, konstraint_core.name, volume.name]), "RHCOP-OCP_BESTPRACT-00018")
+      }
+
+      containers_volumemounts_contains_volume(containers, volume) {
+        containers[_].volumeMounts[_].name == volume.name
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: deploymentconfigtriggerscontainername
+spec:
+  crd:
+    spec:
+      names:
+        kind: DeploymentconfigTriggersContainername
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package deploymentconfig_triggers_containername
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00027")
+        openshift.is_deploymentconfig
+
+        triggerImageChangeParams := konstraint_core.resource.spec.triggers[_].imageChangeParams
+        triggerContainerName := triggerImageChangeParams.containerNames[_]
+
+        not containers_contains_trigger(openshift.containers, triggerContainerName)
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: has a imageChangeParams trigger with a miss-matching container name for '%s'", [konstraint_core.kind, konstraint_core.name, triggerContainerName]), "RHCOP-OCP_BESTPRACT-00027")
+      }
+
+      containers_contains_trigger(containers, triggerContainerName) {
+        containers[_].name == triggerContainerName
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: podantiaffinitynotset
+spec:
+  crd:
+    spec:
+      names:
+        kind: PodAntiaffinityNotset
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package pod_antiaffinity_notset
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00026")
+        openshift.pod
+
+        konstraint_core.missing_field(konstraint_core.resource.spec.affinity, "podAntiAffinity")
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: spec.affinity.podAntiAffinity not set. See: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#inter-pod-affinity-and-anti-affinity", [konstraint_core.kind, konstraint_core.name]), "RHCOP-OCP_BESTPRACT-00026")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  creationTimestamp: null
+  name: routetlsterminationnotset
+spec:
+  crd:
+    spec:
+      names:
+        kind: RouteTlsTerminationNotset
+  targets:
+  - libs:
+    - |-
+      package lib.konstraint.core
+
+      default is_gatekeeper = false
+
+      is_gatekeeper {
+          has_field(input, "review")
+          has_field(input.review, "object")
+      }
+
+      resource = input.review.object {
+          is_gatekeeper
+      }
+
+      resource = input {
+          not is_gatekeeper
+      }
+
+      format(msg) = {"msg": msg} {
+          true
+      }
+
+      format_with_id(msg, id) = msg_fmt {
+          msg_fmt := {
+              "msg": sprintf("%s: %s", [id, msg]),
+              "details": {"policyID": id}
+          }
+      }
+
+      apiVersion = resource.apiVersion
+      name = resource.metadata.name
+      kind = resource.kind
+      labels = resource.metadata.labels
+      annotations = resource.metadata.annotations
+      gv := split(apiVersion, "/")
+      group = gv[0] {
+          contains(apiVersion, "/")
+      }
+      group = "core" {
+          not contains(apiVersion, "/")
+      }
+      version := gv[count(gv) - 1]
+
+
+
+      has_field(obj, field) {
+          not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+      }
+
+      missing_field(obj, field) = true {
+          obj[field] == ""
+      }
+
+      missing_field(obj, field) = true {
+          not has_field(obj, field)
+      }
+    - |-
+      package lib.openshift
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.konstraint.pods as konstraint_pods
+      import data.lib.kubernetes
+
+      pod = konstraint_pods.pod {
+          konstraint_pods.pod
+      }
+
+      pod = konstraint_core.resource.spec.template {
+          is_deploymentconfig
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      is_deploymentconfig {
+          lower(konstraint_core.apiVersion) == "apps.openshift.io/v1"
+          lower(konstraint_core.kind) == "deploymentconfig"
+      }
+
+      is_route {
+          lower(konstraint_core.apiVersion) == "route.openshift.io/v1"
+          lower(konstraint_core.kind) == "route"
+      }
+
+      is_pod_or_networking {
+          pod
+      }
+
+      is_pod_or_networking {
+          kubernetes.is_service
+      }
+
+      is_pod_or_networking {
+          is_route
+      }
+
+      is_policy_active(policyId) {
+          not konstraint_core.is_gatekeeper
+      }
+
+      is_policy_active(policyId) {
+          konstraint_core.is_gatekeeper
+
+          disabledpolicies := namespace_disabled_policies_label
+          not label_contains(disabledpolicies, policyId)
+      }
+
+      label_contains(disabledpolicies, policyId) {
+          policyId == disabledpolicies[_]
+      }
+
+      namespace_disabled_policies_label = disabledpolicies {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          label := namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+          disabledpolicies := split(label, ",")
+      }
+
+      namespace_disabled_policies_label = [""] {
+          namepace := data.inventory.cluster["v1"].Namespace[konstraint_core.resource.metadata.namespace]
+          not namepace.metadata.labels["redhat-cop.github.com/gatekeeper-disabled-policies"]
+      }
+    - |-
+      package lib.konstraint.pods
+
+      import data.lib.konstraint.core
+
+      default pod = false
+
+      pod = core.resource.spec.template {
+          pod_templates := ["daemonset","deployment","job","replicaset","replicationcontroller","statefulset"]
+          lower(core.kind) == pod_templates[_]
+      }
+
+      pod = core.resource {
+          lower(core.kind) == "pod"
+      }
+
+      pod = core.resource.spec.jobTemplate.spec.template {
+          lower(core.kind) == "cronjob"
+      }
+
+      containers[container] {
+          keys = {"containers", "initContainers"}
+          all_containers = [c | keys[k]; c = pod.spec[k][_]]
+          container = all_containers[_]
+      }
+
+      volumes[volume] {
+          volume = pod.spec.volumes[_]
+      }
+    - |-
+      package lib.kubernetes
+
+      import data.lib.konstraint.core as konstraint_core
+
+      is_deployment {
+          lower(konstraint_core.apiVersion) == "apps/v1"
+          lower(konstraint_core.kind) == "deployment"
+      }
+
+      is_service {
+          lower(konstraint_core.apiVersion) == "v1"
+          lower(konstraint_core.kind) == "service"
+      }
+
+      is_rolebinding {
+          lower(konstraint_core.apiVersion) == "rbac.authorization.k8s.io/v1"
+          lower(konstraint_core.kind) == "rolebinding"
+      }
+    rego: |-
+      package route_tls_termination_notset
+
+      import data.lib.konstraint.core as konstraint_core
+      import data.lib.openshift
+
+      violation[msg] {
+        openshift.is_policy_active("RHCOP-OCP_BESTPRACT-00025")
+        openshift.is_route
+
+        not konstraint_core.resource.spec.tls.termination
+
+        msg := konstraint_core.format_with_id(sprintf("%s/%s: TLS termination type not set. See https://docs.openshift.com/container-platform/4.6/networking/routes/secured-routes.html", [konstraint_core.kind, konstraint_core.name]), "RHCOP-OCP_BESTPRACT-00025")
+      }
+    target: admission.k8s.gatekeeper.sh
+status: {}
+

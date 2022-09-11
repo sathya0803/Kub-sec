@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+imagePullSecrets:
+- name: pierone.stups.zalan.do  # required to pull images from private registry
+metadata:
+  name: operator
+  namespace: kube-public

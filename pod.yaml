@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: opa
+  labels:
+    app.kubernetes.io/name: Task
+    app.kubernetes.io/instance: Opa
+    app.kubernetes.io/version: v1
+    app.kubernetes.io/component: Task
+    app.kubernetes.io/part-of: TaskOpa
+    app.kubernetes.io/managed-by: Opa
+    redhat-cop.github.com/team: rego-polices
+    owner: user.agilebank.demo
+  annotations:
+    a8r.io/owner: "dev-team-alfa@contoso.com"
+    a8r.io/runbook: "https://confluence.contoso.com/dev-team-alfa/runbooks"
+spec:
+  containers:
+  - name: opa
+    image: public.ecr.aws/k2t2g9f4/kubechecks:latest@sha256:6ef87ffff910fa1c07bf980a2049ada99130500d81d92dcd184a3665b2f228d5
+    env:
+      - name: CONTAINER_MAX_MEMORY
+        valueFrom:
+          resourceFieldRef:
+            resource: limits.memory 
+      - name: CLOUD_TYPE
+        value: "AWS"
+      - name: CLUSTER_REGION
+        value: "us-east-1"
+      - name: CLUSTER_TYPE
+        value: "EKS"
+      - name: CLUSTER_NAME
+#        value: "dev-compliance-169aC2418"
+        value: "intern-security"
+      - name: CLUSTER_ID
+        value: "BBAAC95676A159BC46B8292577CE1D59"
+      - name: USER_ID
+        value: "ccd28ee1-fd8d-4701-85b3-93c7ab416e21"
+      - name: API_ENDPOINT
+        value: "https://1c986ki7lb.execute-api.us-east-1.amazonaws.com/dev/gatekeeper"
+    resources:
+       limits:
+        cpu: "100m"
+        memory: "128Mi"
+    ports:
+      - containerPort: 8080
+    readinessProbe:
+      tcpSocket:
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    livenessProbe:
+      tcpSocket:
+        port: 8080
+      initialDelaySeconds: 15
+      periodSeconds: 20
+  

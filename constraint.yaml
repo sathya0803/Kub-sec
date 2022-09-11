@@ -1,0 +1,737 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sAllowedRepos
+metadata:
+  name: tcb-gen-k8s-allowed-repos
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - "default"
+  parameters:
+    repos:
+      - "gayudock/"
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sBlockNodePort
+metadata:
+  name: tcb-gen-k8s-block-nodeport-services
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Service"]
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sContainerLimits
+metadata:
+  name: tcb-gen-k8s-container-limits
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+  parameters:
+    cpu: "200m"
+    memory: "1Gi"
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sContainerRatios
+metadata:
+  name: tcb-gen-k8s-container-resourceratios
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod", "Deployment"]
+  parameters:
+    ratio: "2"
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowedTags
+metadata:
+  name: tcb-gen-k8s-disallowedtags
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod","Deployment"]
+    namespaces:
+      - "default"
+  parameters:
+    tags: ["latest"]
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sExternalIPs
+metadata:
+  name: tcb-gen-k8s-externalip
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Service"]
+  parameters:
+    allowedIPs:
+      - "203.0.113.0"
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sHttpsOnly
+metadata:
+  name: tcb-gen-k8s-httpsonly
+spec:
+  match:
+    kinds:
+      - apiGroups: ["extensions", "networking.k8s.io"]
+        kinds: ["Ingress","Deployemtn","Pod"]
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sImageDigests
+metadata:
+  name: tcb-gen-k8s-image-digests
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - "default"
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sReplicaLimits
+metadata:
+  name: tcb-gen-k8s-replicalimits
+spec:
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "Pod"]
+  parameters:
+    ranges:
+    - min_replicas: 3
+      max_replicas: 5
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredAnnotations
+metadata:
+  name: tcb-gen-k8s-required-annotations
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Service","Deployment","Pod"]
+  parameters:
+    message: "All services must have a `a8r.io/owner` and `a8r.io/runbook` annotations."
+    annotations:
+      - key: a8r.io/owner
+        # Matches email address or github user
+        allowedRegex: ^([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,6}|[a-z]{1,39})$
+      - key: a8r.io/runbook
+        # Matches urls including or not http/https
+        allowedRegex: ^(http:\/\/www\.|https:\/\/www\.|http:\/\/|https:\/\/)?[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,5}(:[0-9]{1,5})?(\/.*)?$
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredLabels
+metadata:
+  name: tcb-gen-k8s-required-labels
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Namespace","Pod","Deployment"]
+  parameters:
+    message: "All namespaces must have an `owner` label that points to your company username"
+    labels:
+      - key: owner
+        allowedRegex: "^[a-zA-Z]+.agilebank.demo$"
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredProbes
+metadata:
+  name: tcb-gen-k8s-required-probes
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod","Deployment"]
+  parameters:
+    probes: ["readinessProbe", "livenessProbe"]
+    probeTypes: ["tcpSocket", "httpGet", "exec"]
+    
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sUniqueIngressHost
+metadata:
+  name: tcb-gen-k8s-unique-ingress-host
+spec:
+  match:
+    kinds:
+      - apiGroups: ["extensions", "networking.k8s.io"]
+        kinds: ["Ingress"]
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1	
+kind: K8sUniqueServiceSelector
+metadata:
+  name: tcb-gen-k8s-unique-service-selector
+  labels:
+    owner: admin.agilebank.demo
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: LBTypeSvcNotAllowed
+metadata:
+  name: tcb-gen-k8s-deny-loadbalancer-type-service
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Service"]
+    namespaces:
+      - "dev"
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: PodHostnetwork
+metadata:
+  name: tcb-gen-k8s-pod-hostnetwork
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: PodReplicasBelowOne
+metadata:
+  name: tcb-gen-k8s-pod-replicas-below-one
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      kinds:
+      - DeploymentConfig
+      - Deployment
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: PodReplicasNotOdd
+metadata:
+  name: tcb-gen-k8s-pod-replicas-not-odd
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      kinds:
+      - DeploymentConfig
+      - Deployment
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: CommonK8sLabelsNotset
+metadata:
+  name: tcb-gen-k8s-common-k8slabels-notset
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      - route.openshift.io
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+      - Service
+      - Route
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerEnvMaxmemoryNotset
+metadata:
+  name: tcb-gen-k8s-containerenvmaxmemory-notset
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerImageLatest
+metadata:
+  name: tcb-gen-k8s-container-image-latest
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerImageUnknownregistries
+metadata:
+  name: tcb-gen-k8s-image-container-unknownregistries
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerJavaXmxSet
+metadata:
+  name:  tcb-gen-k8s-container-java-xmxset
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerLabelkeyInconsistent
+metadata:
+  name: tcb-gen-k8s-container-labelkey-inconsistent
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerLivenessprobeNotset
+metadata:
+  name: tcb-gen-k8s-container-livenessprobe-notset
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerLivenessReadinessprobeEqual
+metadata:
+  name: tcb-gen-k8s-container-liveness-readinessprobe-equal
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerReadinessprobeNotset
+metadata:
+  name: tcb-gen-k8s-container-readiness-probe-notset
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerResourcesLimitsCpuSet
+metadata:
+  name: tcb-gen-k8s-container-resources-limits-cpu-set
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerResourcesLimitsMemoryGreaterThan
+metadata:
+  name: tcb-gen-k8s-container-resources-limits-memory-greater-than
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerResourcesLimitsMemoryNotset
+metadata:
+  name: tcb-gen-k8s-container-resources-limits-memory-notset
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerResourcesMemoryunitIncorrect
+metadata:
+  name: tcb-gen-k8s-container-resources-memoryunit-incorrect
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerResourcesRequestsCpuunitIncorrect
+metadata:
+  name: tcb-gen-k8s-container-resources-requests-cpuunit-incorrect
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerResourcesRequestsMemoryGreaterThan
+metadata:
+  name:  tcb-gen-k8s-container-resources-requests-memory-greater-than
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerSecretMountedEnvs
+metadata:
+  name: tcb-gen-k8s-container-secret-mounted-envs
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerVolumemountInconsistentPath
+metadata:
+  name: tcb-gen-k8s-container-volumemount-inconsistent-path
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerVolumemountMissing
+metadata:
+  name: tcb-gen-k8s-container-volumemount-missing
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      - batch
+      kinds:
+      - DeploymentConfig
+      - DaemonSet
+      - Deployment
+      - Job
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+      - CronJob
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: DeploymentconfigTriggersContainername
+metadata:
+  name:  tcb-gen-k8s-deploymentconfig-triggers-containername
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      kinds:
+      - DeploymentConfig
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: PodAntiaffinityNotset
+metadata:
+  name: tcb-gen-k8s-pod-antiaffinity-notset
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - apps.openshift.io
+      - apps
+      - ""
+      kinds:
+      - DeploymentConfig
+      - Deployment
+      - ReplicaSet
+      - ReplicationController
+      - StatefulSet
+      - Pod
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: RouteTlsTerminationNotset
+metadata:
+  name: tcb-gen-k8s-route-tls-termination-notset
+spec:
+  match:
+    kinds:
+    - apiGroups:
+      - route.openshift.io
+      kinds:
+      - Route
+      
